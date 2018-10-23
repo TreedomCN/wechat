@@ -8,14 +8,13 @@ package media
 import (
 	"errors"
 	"fmt"
+	"gopkg.in/chanxuehong/wechat.v1/json"
+	"gopkg.in/chanxuehong/wechat.v1/mp"
 	"io"
 	"mime"
 	"net/http"
 	"net/url"
 	"os"
-
-	"gopkg.in/chanxuehong/wechat.v1/json"
-	"gopkg.in/chanxuehong/wechat.v1/mp"
 )
 
 // 下载多媒体到文件.
@@ -33,6 +32,81 @@ func (clt *Client) DownloadMedia(mediaId, filepath string) (written int64, err e
 	}()
 
 	return clt.downloadMediaToWriter(mediaId, file)
+}
+
+func (clt *Client) DownloadHDAudio(mediaId, filepath string) (written int64, err error) {
+	file, err := os.Create(filepath)
+	if err != nil {
+		return
+	}
+	defer func() {
+		file.Close()
+		if err != nil {
+			os.Remove(filepath)
+		}
+	}()
+
+	return clt.downloadHDAudioToWriter(mediaId, file)
+}
+
+// 下载多媒体到 io.Writer.
+func (clt *Client) downloadHDAudioToWriter(mediaId string, writer io.Writer) (written int64, err error) {
+	token, err := clt.Token()
+	if err != nil {
+		return
+	}
+
+	hasRetried := false
+RETRY:
+	finalURL := "https://api.weixin.qq.com/cgi-bin/media/get/jssdk?media_id=" + url.QueryEscape(mediaId) +
+		"&access_token=" + url.QueryEscape(token)
+
+	httpResp, err := clt.HttpClient.Get(finalURL)
+	if err != nil {
+		return
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		err = fmt.Errorf("http.Status: %s", httpResp.Status)
+		return
+	}
+
+	ContentType, _, _ := mime.ParseMediaType(httpResp.Header.Get("Content-Type"))
+	if ContentType != "text/plain" && ContentType != "application/json" { // 返回的是媒体流
+		return io.Copy(writer, httpResp.Body)
+	}
+
+	// 返回的是错误信息
+	var result mp.Error
+	if err = json.NewDecoder(httpResp.Body).Decode(&result); err != nil {
+		return
+	}
+
+	switch result.ErrCode {
+	case mp.ErrCodeOK:
+		return // 基本不会出现
+	case mp.ErrCodeInvalidCredential, mp.ErrCodeAccessTokenExpired: // 失效(过期)重试一次
+		mp.LogInfoln("[WECHAT_RETRY] err_code:", result.ErrCode, ", err_msg:", result.ErrMsg)
+		mp.LogInfoln("[WECHAT_RETRY] current token:", token)
+
+		if !hasRetried {
+			hasRetried = true
+
+			if token, err = clt.TokenRefresh(); err != nil {
+				return
+			}
+			mp.LogInfoln("[WECHAT_RETRY] new token:", token)
+
+			result = mp.Error{}
+			goto RETRY
+		}
+		mp.LogInfoln("[WECHAT_RETRY] fallthrough, current token:", token)
+		fallthrough
+	default:
+		err = &result
+		return
+	}
 }
 
 // 下载多媒体到 io.Writer.

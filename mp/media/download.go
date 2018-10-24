@@ -31,6 +31,21 @@ func Download(clt *core.Client, mediaId, filepath string) (written int64, err er
 	return DownloadToWriter(clt, mediaId, file)
 }
 
+func DownloadHDAudio(clt *core.Client, mediaId, filepath string) (written int64, err error) {
+	file, err := os.Create(filepath)
+	if err != nil {
+		return
+	}
+	defer func() {
+		file.Close()
+		if err != nil {
+			os.Remove(filepath)
+		}
+	}()
+
+	return DownloadHDAudioToWriter(clt, mediaId, file)
+}
+
 // DownloadToWriter 下载多媒体到 io.Writer.
 //  请注意, 视频文件不支持下载
 func DownloadToWriter(clt *core.Client, mediaId string, writer io.Writer) (written int64, err error) {
@@ -40,6 +55,53 @@ func DownloadToWriter(clt *core.Client, mediaId string, writer io.Writer) (writt
 	}
 
 	var incompleteURL = "https://api.weixin.qq.com/cgi-bin/media/get?media_id=" + url.QueryEscape(mediaId) + "&access_token="
+	var errorResult core.Error
+
+	token, err := clt.Token()
+	if err != nil {
+		return
+	}
+
+	hasRetried := false
+RETRY:
+	finalURL := incompleteURL + url.QueryEscape(token)
+	written, err = httpDownloadToWriter(httpClient, finalURL, writer, &errorResult)
+	if err != nil {
+		return
+	}
+	if written > 0 {
+		return
+	}
+
+	switch errorResult.ErrCode {
+	case core.ErrCodeOK:
+		return // 基本不会出现
+	case core.ErrCodeInvalidCredential, core.ErrCodeAccessTokenExpired:
+		retry.DebugPrintError(errorResult.ErrCode, errorResult.ErrMsg, token)
+		if !hasRetried {
+			hasRetried = true
+			errorResult = core.Error{}
+			if token, err = clt.RefreshToken(token); err != nil {
+				return
+			}
+			retry.DebugPrintNewToken(token)
+			goto RETRY
+		}
+		retry.DebugPrintFallthrough(token)
+		fallthrough
+	default:
+		err = &errorResult
+		return
+	}
+}
+
+func DownloadHDAudioToWriter(clt *core.Client, mediaId string, writer io.Writer) (written int64, err error) {
+	httpClient := clt.HttpClient
+	if httpClient == nil {
+		httpClient = util.DefaultMediaHttpClient
+	}
+
+	var incompleteURL = "https://api.weixin.qq.com/cgi-bin/media/get/jssdk?media_id=" + url.QueryEscape(mediaId) + "&access_token="
 	var errorResult core.Error
 
 	token, err := clt.Token()
